@@ -2,66 +2,99 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"os/exec"
 	"slices"
+	"sync/atomic"
+	"syscall"
 
 	"github.com/creack/pty"
 	"golang.org/x/crypto/ssh"
 )
 
-var (
-	errUserNotAllowed = errors.New("user not allowed")
-	errUnknownPubKey  = errors.New("unknown pubkey")
-)
+const statusOk = 0
 
-type SshServer interface {
-	Listen() error
-	Accept() error
-	Close() error
-	Addr() net.Addr
+type Session struct {
+	user string
+	ch   ssh.Channel
+	reqs <-chan *ssh.Request
 }
 
-type sshServerImpl struct {
+func (s *Session) close() error {
+	return s.ch.Close()
+}
+
+type SshServer struct {
 	cfg          *Cfg
 	listener     net.Listener
 	sshServerCfg *ssh.ServerConfig
 	ctx          context.Context
 	cancel       context.CancelFunc
+	userInfo     map[string]userInfo
 }
 
-func NewSshServer(cfg *Cfg) SshServer {
+func NewSshServer(cfg *Cfg) *SshServer {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &sshServerImpl{
+	return &SshServer{
 		cfg:    cfg,
 		ctx:    ctx,
 		cancel: cancel,
 	}
 }
 
-func (s *sshServerImpl) Listen() error {
-	sshServerCfg, err := initServerCfg(s.cfg)
+func (s *SshServer) Init() error {
+	sshServerCfg, err := s.initServerCfg(s.cfg)
 	if err != nil {
 		return fmt.Errorf("could not create init server config: %s", err)
 	}
 	s.sshServerCfg = sshServerCfg
-	listener, err := listen(s.cfg)
+	usersMap, err := loadUsersMap(s.cfg.AuthorizedUsers)
 	if err != nil {
-		return fmt.Errorf("could not start listener: %s", err)
+		return fmt.Errorf("error loading users info: %s", err)
+	}
+	s.userInfo = usersMap
+	return nil
+}
+
+func (s *SshServer) Listen() error {
+	address := fmt.Sprintf("%s:%s", s.cfg.Interface, s.cfg.Port)
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("error starting listener on %s: %s", address, err)
 	}
 	s.listener = listener
 	return nil
 }
 
-func (s *sshServerImpl) Accept() error {
-	return accept(s.sshServerCfg, s.listener, s.ctx)
+func (s *SshServer) Accept() error {
+	fmt.Println("listening on:", s.listener.Addr())
+	for {
+		conn, err := s.listener.Accept()
+		select {
+		case <-s.ctx.Done():
+			fmt.Println("connection stopped")
+			return nil
+		default:
+			if err != nil {
+				fmt.Println("error accepting connection: ", err)
+				continue
+			}
+		}
+
+		sConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshServerCfg)
+		if err != nil {
+			fmt.Println("could not establish server connection: ", err)
+			continue
+		}
+		go ssh.DiscardRequests(reqs)
+
+		go s.handleServerConn(sConn, chans)
+	}
 }
 
-func (s *sshServerImpl) Close() error {
+func (s *SshServer) Close() error {
 	s.cancel()
 	if err := s.listener.Close(); err != nil {
 		return fmt.Errorf("error closing listener: %s", err)
@@ -69,62 +102,26 @@ func (s *sshServerImpl) Close() error {
 	return nil
 }
 
-func (s *sshServerImpl) Addr() net.Addr {
+func (s *SshServer) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-func pubKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey, authorizedKeys map[string]bool, authorizedUsers []string) (*ssh.Permissions, error) {
-	user := conn.User()
-
+func (s *SshServer) pubKeyCallback(user string, key ssh.PublicKey, authorizedKeys map[string]bool, authorizedUsers []string) (*ssh.Permissions, error) {
 	if !slices.Contains(authorizedUsers, user) {
-		return nil, errUserNotAllowed
+		return nil, fmt.Errorf("user not allowed")
 	}
 
-	if authorizedKeys[string(key.Marshal())] {
+	if authorizedKeys[ssh.FingerprintSHA256(key)] {
 		return &ssh.Permissions{
 			Extensions: map[string]string{
 				"pubkey": string(key.Marshal()),
 			},
 		}, nil
 	}
-	return nil, errUnknownPubKey
+	return nil, fmt.Errorf("unknown public key")
 }
 
-func readAuthorizedKeysFile(filepath string) (map[string]bool, error) {
-	authorizedKeysBytes, err := os.ReadFile(filepath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load authorized_keys, err: %w", err)
-	}
-
-	authorizedKeysMap := map[string]bool{}
-	for len(authorizedKeysBytes) > 0 {
-		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(authorizedKeysBytes)
-		if err != nil {
-			return nil, fmt.Errorf("public key parsing: %w", err)
-		}
-		authorizedKeysMap[string(pubKey.Marshal())] = true
-		authorizedKeysBytes = rest
-	}
-	return authorizedKeysMap, nil
-}
-
-func getPrivateKeySigner(privateKeyFile string) (ssh.Signer, error) {
-	privateBytes, err := os.ReadFile(privateKeyFile)
-
-	if err != nil {
-		return nil, fmt.Errorf("error reading private key: %s", err)
-	}
-
-	private, err := ssh.ParsePrivateKey(privateBytes)
-
-	if err != nil {
-		return nil, fmt.Errorf("error parsing private key: %s", err)
-	}
-
-	return private, nil
-}
-
-func initServerCfg(cfg *Cfg) (*ssh.ServerConfig, error) {
+func (s *SshServer) initServerCfg(cfg *Cfg) (*ssh.ServerConfig, error) {
 	authorizedKeys, err := readAuthorizedKeysFile(cfg.AuthorizedKeyFile)
 
 	if err != nil {
@@ -133,7 +130,7 @@ func initServerCfg(cfg *Cfg) (*ssh.ServerConfig, error) {
 
 	serverCfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			return pubKeyCallback(conn, key, authorizedKeys, cfg.AuthorizedUsers)
+			return s.pubKeyCallback(conn.User(), key, authorizedKeys, cfg.AuthorizedUsers)
 		},
 	}
 
@@ -148,42 +145,7 @@ func initServerCfg(cfg *Cfg) (*ssh.ServerConfig, error) {
 	return serverCfg, nil
 }
 
-func listen(cfg *Cfg) (net.Listener, error) {
-	address := fmt.Sprintf("%s:%s", cfg.Interface, cfg.Port)
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return nil, fmt.Errorf("error starting listener on %s: %s", address, err)
-	}
-	return listener, nil
-}
-
-func accept(serverCfg *ssh.ServerConfig, listener net.Listener, ctx context.Context) error {
-	fmt.Println("listening on:", listener.Addr())
-	for {
-		conn, err := listener.Accept()
-		select {
-		case <-ctx.Done():
-			fmt.Println("connection stopped")
-			return nil
-		default:
-			if err != nil {
-				fmt.Println("error accepting connection: ", err)
-				continue
-			}
-		}
-
-		sConn, chans, reqs, err := ssh.NewServerConn(conn, serverCfg)
-		if err != nil {
-			fmt.Println("could not establish server connection: ", err)
-			continue
-		}
-		go ssh.DiscardRequests(reqs)
-
-		go handleServerConn(sConn, chans)
-	}
-}
-
-func handleServerConn(sConn *ssh.ServerConn, chans <-chan ssh.NewChannel) {
+func (s *SshServer) handleServerConn(sConn *ssh.ServerConn, chans <-chan ssh.NewChannel) {
 	fmt.Printf("started connection: %s\n", sConn.RemoteAddr())
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
@@ -196,29 +158,56 @@ func handleServerConn(sConn *ssh.ServerConn, chans <-chan ssh.NewChannel) {
 			fmt.Printf("error handling channel creation request: %s\n", err)
 			continue
 		}
-		go handleRequests(reqs, ch)
+		session := Session{
+			user: sConn.User(),
+			ch:   ch,
+			reqs: reqs,
+		}
+		go s.handleRequests(session)
 	}
 }
 
-func handleRequests(in <-chan *ssh.Request, ch ssh.Channel) {
-	defer ch.Close()
-
+func (s *SshServer) handleRequests(session Session) {
+	defer session.close()
 	var ptyReq *ptyReq
+	var envVars []string
+	var home = "/home/" + session.user
+	var closed atomic.Bool
 
-	for req := range in {
-		fmt.Println("req type: ", req)
+	for req := range session.reqs {
 		switch req.Type {
-		case "exec":
-			var command string
-			var ok bool
-			if len(req.Payload) > 4 {
-				command, _, ok = parseString(req.Payload)
-				if !ok {
-					fmt.Println("error parsing payload")
-					ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-				}
+		case "env":
+			envVar, rest, ok := parseString(req.Payload)
+			if !ok {
+				fmt.Println("error parsing payload")
+				req.Reply(false, nil)
+				continue
 			}
-			cmd := exec.Command("/bin/bash", "-c", command)
+			if len(rest) == 0 {
+				fmt.Println("error parsing payload")
+				req.Reply(false, nil)
+				continue
+			}
+			envVarValue, _, ok := parseString(rest)
+			if !ok {
+				fmt.Println("error parsing payload")
+				req.Reply(false, nil)
+				continue
+			}
+			req.Reply(true, nil)
+			envVars = append(envVars, envVar+"="+envVarValue)
+		case "exec":
+			command, _, ok := parseString(req.Payload)
+			if !ok {
+				fmt.Println("error parsing payload")
+				req.Reply(false, nil)
+				return
+			}
+
+			req.Reply(true, nil)
+			cmd := exec.Command(s.cfg.Terminal, "-c", command)
+			cmd.Env = envVars
+			cmd.Dir = home
 
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
@@ -242,103 +231,92 @@ func handleRequests(in <-chan *ssh.Request, ch ssh.Channel) {
 				return
 			}
 
-			go io.Copy(stdin, ch)
-			io.Copy(ch, stdout)
-			io.Copy(ch, stderr)
+			go io.Copy(stdin, session.ch)
+			io.Copy(session.ch, stdout)
+			io.Copy(session.ch, stderr)
 
 			if err = cmd.Wait(); err != nil {
 				fmt.Println("error waiting command to finish: ", err)
 				return
 			}
-
-			ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-			return
+			s.sendExitStatus(session.ch, &closed)
 		case "pty-req":
 			pty, ok := parsePtyRequest(req.Payload)
 			if !ok {
 				req.Reply(false, nil)
 				continue
 			}
+			req.Reply(true, nil)
 			ptyReq = &pty
-
 		case "shell":
 			if ptyReq == nil {
+				req.Reply(false, nil)
 				return
 			}
+			req.Reply(true, nil)
 			win := pty.Winsize{
 				X: uint16(ptyReq.Window.Width),
 				Y: uint16(ptyReq.Window.Height),
 			}
 
-			cmd := exec.Command("/bin/bash")
-			cmd.Env = append(os.Environ(), "TERM="+ptyReq.Term)
+			cmd := exec.Command(s.cfg.Terminal)
+			envVars = append(envVars, "TERM="+ptyReq.Term)
+			cmd.Env = append(cmd.Env, envVars...)
+			cmd.Dir = home
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+			// cmd.SysProcAttr.Credential = &syscall.Credential{
+			// 	Uid: 1000,
+			// 	Gid: 1000,
+			// }
 
-			f, err := pty.StartWithSize(cmd, &win)
+			terminal, err := pty.StartWithSize(cmd, &win)
 			if err != nil {
 				fmt.Println("error setting pty: ", err)
-				req.Reply(false, nil)
 				return
 			}
-			req.Reply(true, nil)
 
 			go func() {
-				if _, err := io.Copy(ch, f); err != nil {
+				defer session.close()
+				if _, err := io.Copy(session.ch, terminal); err != nil {
 					fmt.Println("connection closed: error copying shell output to channel: ", err)
 				}
-				ch.Close()
+				s.sendExitStatus(session.ch, &closed)
 			}()
 			go func() {
-				if _, err := io.Copy(f, ch); err != nil {
+				defer terminal.Close()
+				if _, err := io.Copy(terminal, session.ch); err != nil {
 					fmt.Println("connection closed: error copying input to shell: ", err)
 				}
-				f.Close()
+				s.sendExitStatus(session.ch, &closed)
 			}()
 
 			go func() {
 				if err := cmd.Wait(); err != nil {
 					fmt.Println("error waiting command: ", err)
-					ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-					ch.Close()
 					return
 				}
+				s.sendExitStatus(session.ch, &closed)
 			}()
-
 		default:
 			fmt.Printf("%s not implemented. Ignoring request\n", req.Type)
+			req.Reply(false, nil)
 		}
 
+		if closed.Load() {
+			if err := session.close(); err != nil {
+				fmt.Println("error closing session: ", err)
+			}
+		}
 	}
 }
 
-func parsePtyRequest(payload []byte) (ptyReq, bool) {
-	term, rest, ok := parseString(payload)
-	if !ok {
-		return ptyReq{}, false
+// sends exist-status and updates the atomic closed flag ensuring the message is sent once
+func (s *SshServer) sendExitStatus(ch ssh.Channel, closed *atomic.Bool) {
+	if closed.Load() {
+		fmt.Println("already closed, skipping exit status message")
+		return
 	}
-	width32, rest, ok := parseUint32(rest)
-	if !ok {
-		return ptyReq{}, false
-	}
-	height32, _, ok := parseUint32(rest)
-	if !ok {
-		return ptyReq{}, false
-	}
-	pty := ptyReq{
-		Term: term,
-		Window: window{
-			Width:  int(width32),
-			Height: int(height32),
-		},
-	}
-	return pty, true
-}
-
-type window struct {
-	Width  int
-	Height int
-}
-
-type ptyReq struct {
-	Term   string
-	Window window
+	ch.SendRequest("exit-status", false, uint32ToBytes(uint32(statusOk)))
+	fmt.Println("exit status sent")
+	closed.Store(true)
 }

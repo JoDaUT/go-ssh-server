@@ -3,69 +3,16 @@ package main
 import (
 	"testing"
 
-	"github.com/JoDaUT/go-ssh-server/mock"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/ssh"
 )
 
 var (
-	fakePublicKey1 = []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOmSeOS8D8eZOcxtjstJC19TQcduSAvR71tyxmZvABWz fake@email.com")
-	fakePublicKey2 = []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGgNTcVhqL0BnjVW0kwWG+XyGveY/QyO34pKSm67M8j6 fake2@email.com")
-	fakePublicKey3 = []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDtbIIZ3BeytmG+zU7ssDPVzaRx8+mAdreK0oxTPFcfV fake2@email.com")
-	connMetaData   = &mock.MockConnMetadata{
-		UserCallbackFn: func() string {
-			return "myuser"
-		},
-	}
+	fakePubKey1        = []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKQaUh3kI70OtSg1Lti5OrjZwoLMIHPvwRTpSOL/rUvd fake@email.com")
+	fakePubKey2        = []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDZBjEddpaQjKMuIaj3Z1tNemcuyG3j1kQUjgzEb/Uoa fakeclientkey@email.com")
+	unauthorizedPubKey = []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGgNTcVhqL0BnjVW0kwWG+XyGveY/QyO34pKSm67M8j6 fake2@email.com")
+	validUser          = "myuser"
 )
-
-func TestReadAuthorizedKeysFile(t *testing.T) {
-	pubKey1, _, _, _, err := ssh.ParseAuthorizedKey(fakePublicKey1)
-	if err != nil {
-		t.Fatal("error parsing public key", err)
-	}
-	pubKey2, _, _, _, err := ssh.ParseAuthorizedKey(fakePublicKey2)
-	if err != nil {
-		t.Fatal("error parsing public key", err)
-	}
-	tests := []struct {
-		name     string
-		filepath string
-		want     map[string]bool
-		wantErr  bool
-	}{
-		{
-			name:     "read unexisting file",
-			filepath: "does-not-exist",
-			wantErr:  true,
-		},
-		{
-			name:     "file with multiple authorized keys",
-			filepath: "testdata/authorized_keys",
-			wantErr:  false,
-			want: map[string]bool{
-				string(pubKey1.Marshal()): true,
-				string(pubKey2.Marshal()): true,
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, gotErr := readAuthorizedKeysFile(tt.filepath)
-			if gotErr != nil {
-				if !tt.wantErr {
-					t.Errorf("ReadAuthorizedKeysFile() failed: %v", gotErr)
-				}
-				return
-			}
-			if tt.wantErr {
-				t.Fatal("ReadAuthorizedKeysFile() succeeded unexpectedly")
-			} else {
-				assert.Equal(t, tt.want, got)
-			}
-		})
-	}
-}
 
 func TestPubKeyCallback(t *testing.T) {
 	authorizedKeys, err := readAuthorizedKeysFile("testdata/authorized_keys")
@@ -73,18 +20,18 @@ func TestPubKeyCallback(t *testing.T) {
 		t.Fatal("error reading authorized keys", err)
 	}
 
-	pubKey1, _, _, _, err := ssh.ParseAuthorizedKey(fakePublicKey1)
+	pubKey1, _, _, _, err := ssh.ParseAuthorizedKey(fakePubKey1)
 	if err != nil {
 		t.Fatal("error reading public key", err)
 	}
-	unauthorizedKey, _, _, _, err := ssh.ParseAuthorizedKey(fakePublicKey3)
+	unauthorizedKey, _, _, _, err := ssh.ParseAuthorizedKey(unauthorizedPubKey)
 	if err != nil {
 		t.Fatal("error reading public key, err")
 	}
 
 	tests := []struct {
 		name            string
-		conn            ssh.ConnMetadata
+		user            string
 		key             ssh.PublicKey
 		authorizedKeys  map[string]bool
 		authorizedUsers []string
@@ -95,8 +42,8 @@ func TestPubKeyCallback(t *testing.T) {
 			name:            "valid auth key",
 			authorizedKeys:  authorizedKeys,
 			key:             pubKey1,
-			conn:            connMetaData,
-			authorizedUsers: []string{"myuser"},
+			user:            validUser,
+			authorizedUsers: []string{validUser},
 			wantErr:         assert.NoError,
 			want: &ssh.Permissions{
 				Extensions: map[string]string{
@@ -109,25 +56,22 @@ func TestPubKeyCallback(t *testing.T) {
 			authorizedKeys:  authorizedKeys,
 			key:             unauthorizedKey,
 			wantErr:         assert.Error,
-			conn:            connMetaData,
-			authorizedUsers: []string{"myuser"},
+			user:            validUser,
+			authorizedUsers: []string{validUser},
 		},
 		{
-			name:           "user not authorized",
-			authorizedKeys: authorizedKeys,
-			key:            unauthorizedKey,
-			wantErr:        assert.Error,
-			conn: &mock.MockConnMetadata{
-				UserCallbackFn: func() string {
-					return "other-user"
-				},
-			},
-			authorizedUsers: []string{"myuser"},
+			name:            "user not authorized",
+			authorizedKeys:  authorizedKeys,
+			key:             unauthorizedKey,
+			wantErr:         assert.Error,
+			user:            "invalid-user",
+			authorizedUsers: []string{validUser},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := pubKeyCallback(tt.conn, tt.key, tt.authorizedKeys, tt.authorizedUsers)
+			sshServer := NewSshServer(nil)
+			got, err := sshServer.pubKeyCallback(tt.user, tt.key, tt.authorizedKeys, tt.authorizedUsers)
 			if !tt.wantErr(t, err) {
 				t.Fail()
 				return

@@ -20,6 +20,10 @@ func run() error {
 	sshServer := NewSshServer(&cfg)
 	defer sshServer.Close()
 
+	if err := sshServer.Init(); err != nil {
+		return err
+	}
+
 	if err := sshServer.Listen(); err != nil {
 		return err
 	}

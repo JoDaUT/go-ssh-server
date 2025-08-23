@@ -1,3 +1,2 @@
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOmSeOS8D8eZOcxtjstJC19TQcduSAvR71tyxmZvABWz fake@email.com
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGgNTcVhqL0BnjVW0kwWG+XyGveY/QyO34pKSm67M8j6 fake2@email.com
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKQaUh3kI70OtSg1Lti5OrjZwoLMIHPvwRTpSOL/rUvd fake@email.com
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDZBjEddpaQjKMuIaj3Z1tNemcuyG3j1kQUjgzEb/Uoa fakeclientkey@email.com

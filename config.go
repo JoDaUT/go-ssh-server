@@ -7,16 +7,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	port         = "8000"
+	netInterface = "0.0.0.0"
+	terminal     = "/bin/bash"
+)
+
 type Cfg struct {
 	Port              string   `yaml:"port"`
 	Interface         string   `yaml:"interface"`
 	AuthorizedKeyFile string   `yaml:"authorized_key_file"`
 	PrivateKeyFile    string   `yaml:"private_key_file"`
 	AuthorizedUsers   []string `yaml:"authorized_users"`
+	Terminal          string   `yaml:"terminal"`
 }
 
 func LoadCfg(file string) (Cfg, error) {
-	var config Cfg
+	config := Cfg{
+		Port:      port,
+		Interface: netInterface,
+		Terminal:  terminal,
+	}
 	f, err := os.Open(file)
 	if err != nil {
 		return Cfg{}, fmt.Errorf("could not read config file: %w", err)

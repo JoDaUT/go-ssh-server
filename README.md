@@ -11,6 +11,7 @@ This repository provides a minimal implementation of an SSH server in Go, create
 - **Not production-ready**: Lacks critical SSH protocol features and security measures.
 - **Limited compatibility**: May not work with all SSH clients, and there’s no guarantee of full compatibility.
 - **No port forwarding, SFTP or subsystems**: These are essential features for a full SSH server but are not implemented in this project. I might add them in the future.
+- **Not Cross Platform**: Only tested on Linux.
 
 ## Inspiration
 This project is inspired mostly by the following resources:
@@ -29,11 +30,12 @@ If you're looking for a more polished solution, I encourage you to check out the
 This application requires a `config.yaml` file to be created in the same folder as the executable. See `config.yaml.example` for a template. Essentially, it mimics some aspects of the `/etc/ssh/sshd_config` file.
 
 ### Required Fields:
-- **interface**: The network interface the server will listen on. Set it to `0.0.0.0` to listen on all available network interfaces.
-- **port**: The port the server will use to listen for incoming connections. Choose any available port on your system.
+- **interface**: The network interface the server will listen on. Default: `0.0.0.0` to listen on all available network interfaces.
+- **port**: The port the server will use to listen for incoming connections. Choose any available port on your system. Default: 8000
 - **authorized_key_file**: The path to a file containing the public keys authorized to be used, similar to the `.ssh/authorized_keys` file.
 - **private_key_file**: The private key that corresponds to one of the public keys in the `authorized_key_file`. If a connecting client uses a private key that doesn’t match any public key in the file, the connection will be rejected.
 - **authorized_users**: A list of authorized users, e.g., `[user1, user2]`.
+- **terminal**: Terminal to be used for sessions and executing remote commands. Default: `/bin/bash`.
 
 ### How to run
 
