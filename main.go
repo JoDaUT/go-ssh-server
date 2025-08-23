@@ -1,14 +1,32 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 func main() {
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := LoadCfg("config.yaml")
 	if err != nil {
-		panic(fmt.Errorf("error loading config: %w", err))
+		return fmt.Errorf("error loading config: %w", err)
 	}
 
-	if err := Listen(&cfg); err != nil {
-		fmt.Println(err)
+	sshServer := NewSshServer(&cfg)
+	defer sshServer.Close()
+
+	if err := sshServer.Listen(); err != nil {
+		return err
 	}
+
+	if err := sshServer.Accept(); err != nil {
+		return err
+	}
+
+	return nil
 }

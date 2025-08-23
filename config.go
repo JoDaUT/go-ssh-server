@@ -8,7 +8,7 @@ import (
 )
 
 type Cfg struct {
-	Port              int      `yaml:"port"`
+	Port              string   `yaml:"port"`
 	Interface         string   `yaml:"interface"`
 	AuthorizedKeyFile string   `yaml:"authorized_key_file"`
 	PrivateKeyFile    string   `yaml:"private_key_file"`

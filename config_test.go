@@ -22,10 +22,10 @@ func TestLoadCfg(t *testing.T) {
 			name: "valid config",
 			file: "testdata/config.test.yaml",
 			want: Cfg{
-				Port:              8001,
+				Port:              "8001",
 				Interface:         "0.0.0.0",
-				AuthorizedKeyFile: ".ssh/authorized_keys",
-				PrivateKeyFile:    ".ssh/id_ed25519",
+				AuthorizedKeyFile: "authorized_keys",
+				PrivateKeyFile:    "fake_key",
 				AuthorizedUsers:   []string{"myuser"},
 			},
 			wantErr: false,

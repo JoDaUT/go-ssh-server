@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,60 @@ var (
 	errUserNotAllowed = errors.New("user not allowed")
 	errUnknownPubKey  = errors.New("unknown pubkey")
 )
+
+type SshServer interface {
+	Listen() error
+	Accept() error
+	Close() error
+	Addr() net.Addr
+}
+
+type sshServerImpl struct {
+	cfg          *Cfg
+	listener     net.Listener
+	sshServerCfg *ssh.ServerConfig
+	ctx          context.Context
+	cancel       context.CancelFunc
+}
+
+func NewSshServer(cfg *Cfg) SshServer {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &sshServerImpl{
+		cfg:    cfg,
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+func (s *sshServerImpl) Listen() error {
+	sshServerCfg, err := initServerCfg(s.cfg)
+	if err != nil {
+		return fmt.Errorf("could not create init server config: %s", err)
+	}
+	s.sshServerCfg = sshServerCfg
+	listener, err := listen(s.cfg)
+	if err != nil {
+		return fmt.Errorf("could not start listener: %s", err)
+	}
+	s.listener = listener
+	return nil
+}
+
+func (s *sshServerImpl) Accept() error {
+	return accept(s.sshServerCfg, s.listener, s.ctx)
+}
+
+func (s *sshServerImpl) Close() error {
+	s.cancel()
+	if err := s.listener.Close(); err != nil {
+		return fmt.Errorf("error closing listener: %s", err)
+	}
+	return nil
+}
+
+func (s *sshServerImpl) Addr() net.Addr {
+	return s.listener.Addr()
+}
 
 func pubKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey, authorizedKeys map[string]bool, authorizedUsers []string) (*ssh.Permissions, error) {
 	user := conn.User()
@@ -53,12 +108,27 @@ func readAuthorizedKeysFile(filepath string) (map[string]bool, error) {
 	return authorizedKeysMap, nil
 }
 
-func Listen(cfg *Cfg) error {
+func getPrivateKeySigner(privateKeyFile string) (ssh.Signer, error) {
+	privateBytes, err := os.ReadFile(privateKeyFile)
 
+	if err != nil {
+		return nil, fmt.Errorf("error reading private key: %s", err)
+	}
+
+	private, err := ssh.ParsePrivateKey(privateBytes)
+
+	if err != nil {
+		return nil, fmt.Errorf("error parsing private key: %s", err)
+	}
+
+	return private, nil
+}
+
+func initServerCfg(cfg *Cfg) (*ssh.ServerConfig, error) {
 	authorizedKeys, err := readAuthorizedKeysFile(cfg.AuthorizedKeyFile)
 
 	if err != nil {
-		return fmt.Errorf("error reading authorized keys: %w", err)
+		return nil, fmt.Errorf("error reading authorized keys: %w", err)
 	}
 
 	serverCfg := &ssh.ServerConfig{
@@ -67,38 +137,39 @@ func Listen(cfg *Cfg) error {
 		},
 	}
 
-	privateBytes, err := os.ReadFile(cfg.PrivateKeyFile)
+	private, err := getPrivateKeySigner(cfg.PrivateKeyFile)
 
 	if err != nil {
-		return fmt.Errorf("error reading private key: %s", err)
-	}
-
-	private, err := ssh.ParsePrivateKey(privateBytes)
-
-	if err != nil {
-		return fmt.Errorf("error parsing private key")
+		return nil, fmt.Errorf("error parsing private key: %s", err)
 	}
 
 	serverCfg.AddHostKey(private)
 
-	return listen(serverCfg, cfg)
-
+	return serverCfg, nil
 }
 
-func listen(serverCfg *ssh.ServerConfig, cfg *Cfg) error {
-	address := fmt.Sprintf("%s:%d", cfg.Interface, cfg.Port)
+func listen(cfg *Cfg) (net.Listener, error) {
+	address := fmt.Sprintf("%s:%s", cfg.Interface, cfg.Port)
 	listener, err := net.Listen("tcp", address)
-
 	if err != nil {
-		return fmt.Errorf("error starting listener on %s: %s", address, err)
+		return nil, fmt.Errorf("error starting listener on %s: %s", address, err)
 	}
+	return listener, nil
+}
 
-	fmt.Println("listening on port:", address)
+func accept(serverCfg *ssh.ServerConfig, listener net.Listener, ctx context.Context) error {
+	fmt.Println("listening on:", listener.Addr())
 	for {
 		conn, err := listener.Accept()
-		if err != nil {
-			fmt.Println("error accepting connection: ", err)
-			continue
+		select {
+		case <-ctx.Done():
+			fmt.Println("connection stopped")
+			return nil
+		default:
+			if err != nil {
+				fmt.Println("error accepting connection: ", err)
+				continue
+			}
 		}
 
 		sConn, chans, reqs, err := ssh.NewServerConn(conn, serverCfg)
@@ -106,7 +177,6 @@ func listen(serverCfg *ssh.ServerConfig, cfg *Cfg) error {
 			fmt.Println("could not establish server connection: ", err)
 			continue
 		}
-
 		go ssh.DiscardRequests(reqs)
 
 		go handleServerConn(sConn, chans)
@@ -133,15 +203,20 @@ func handleServerConn(sConn *ssh.ServerConn, chans <-chan ssh.NewChannel) {
 func handleRequests(in <-chan *ssh.Request, ch ssh.Channel) {
 	defer ch.Close()
 
-	var ptyReq *Pty
+	var ptyReq *ptyReq
 
 	for req := range in {
-		fmt.Println("process req type: ", req.Type)
+		fmt.Println("req type: ", req)
 		switch req.Type {
 		case "exec":
 			var command string
+			var ok bool
 			if len(req.Payload) > 4 {
-				command = string(req.Payload[4:]) //remove byte corresponding to the payload size (uint32)
+				command, _, ok = parseString(req.Payload)
+				if !ok {
+					fmt.Println("error parsing payload")
+					ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+				}
 			}
 			cmd := exec.Command("/bin/bash", "-c", command)
 
@@ -177,7 +252,6 @@ func handleRequests(in <-chan *ssh.Request, ch ssh.Channel) {
 			}
 
 			ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-			ch.Close()
 			return
 		case "pty-req":
 			pty, ok := parsePtyRequest(req.Payload)
@@ -236,22 +310,22 @@ func handleRequests(in <-chan *ssh.Request, ch ssh.Channel) {
 	}
 }
 
-func parsePtyRequest(payload []byte) (Pty, bool) {
+func parsePtyRequest(payload []byte) (ptyReq, bool) {
 	term, rest, ok := parseString(payload)
 	if !ok {
-		return Pty{}, false
+		return ptyReq{}, false
 	}
 	width32, rest, ok := parseUint32(rest)
 	if !ok {
-		return Pty{}, false
+		return ptyReq{}, false
 	}
 	height32, _, ok := parseUint32(rest)
 	if !ok {
-		return Pty{}, false
+		return ptyReq{}, false
 	}
-	pty := Pty{
+	pty := ptyReq{
 		Term: term,
-		Window: Window{
+		Window: window{
 			Width:  int(width32),
 			Height: int(height32),
 		},
@@ -259,12 +333,12 @@ func parsePtyRequest(payload []byte) (Pty, bool) {
 	return pty, true
 }
 
-type Window struct {
+type window struct {
 	Width  int
 	Height int
 }
 
-type Pty struct {
+type ptyReq struct {
 	Term   string
-	Window Window
+	Window window
 }
