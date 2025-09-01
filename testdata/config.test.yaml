@@ -1,7 +1,7 @@
 port: 8001
 interface: 0.0.0.0
-authorized_key_file: authorized_keys
-private_key_file: fake_server_key
+authorized_key_file: testdata/authorized_keys
+private_key_file: testdata/fake_server_key
 authorized_users:
-  - myuser
-terminal: /bin/bash
+  - test
+passwd_file: testdata/passwd.txt

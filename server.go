@@ -32,7 +32,7 @@ type SshServer struct {
 	sshServerCfg *ssh.ServerConfig
 	ctx          context.Context
 	cancel       context.CancelFunc
-	userInfo     map[string]userInfo
+	passwd       map[string]passwd
 }
 
 func NewSshServer(cfg *Cfg) *SshServer {
@@ -45,16 +45,18 @@ func NewSshServer(cfg *Cfg) *SshServer {
 }
 
 func (s *SshServer) Init() error {
+	passwdMap, err := loadPasswdMap(s.cfg.AuthorizedUsers, s.cfg.PasswdFile)
+	if err != nil {
+		return fmt.Errorf("error loading users info: %s", err)
+	}
+	s.passwd = passwdMap
+
 	sshServerCfg, err := s.initServerCfg(s.cfg)
 	if err != nil {
 		return fmt.Errorf("could not create init server config: %s", err)
 	}
 	s.sshServerCfg = sshServerCfg
-	usersMap, err := loadUsersMap(s.cfg.AuthorizedUsers)
-	if err != nil {
-		return fmt.Errorf("error loading users info: %s", err)
-	}
-	s.userInfo = usersMap
+
 	return nil
 }
 
@@ -96,6 +98,9 @@ func (s *SshServer) Accept() error {
 
 func (s *SshServer) Close() error {
 	s.cancel()
+	if s.listener == nil {
+		return nil
+	}
 	if err := s.listener.Close(); err != nil {
 		return fmt.Errorf("error closing listener: %s", err)
 	}
@@ -106,21 +111,6 @@ func (s *SshServer) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-func (s *SshServer) pubKeyCallback(user string, key ssh.PublicKey, authorizedKeys map[string]bool, authorizedUsers []string) (*ssh.Permissions, error) {
-	if !slices.Contains(authorizedUsers, user) {
-		return nil, fmt.Errorf("user not allowed")
-	}
-
-	if authorizedKeys[ssh.FingerprintSHA256(key)] {
-		return &ssh.Permissions{
-			Extensions: map[string]string{
-				"pubkey": string(key.Marshal()),
-			},
-		}, nil
-	}
-	return nil, fmt.Errorf("unknown public key")
-}
-
 func (s *SshServer) initServerCfg(cfg *Cfg) (*ssh.ServerConfig, error) {
 	authorizedKeys, err := readAuthorizedKeysFile(cfg.AuthorizedKeyFile)
 
@@ -128,9 +118,14 @@ func (s *SshServer) initServerCfg(cfg *Cfg) (*ssh.ServerConfig, error) {
 		return nil, fmt.Errorf("error reading authorized keys: %w", err)
 	}
 
+	users := make([]string, len(s.passwd))
+	for username, _ := range s.passwd {
+		users = append(users, username)
+	}
+
 	serverCfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			return s.pubKeyCallback(conn.User(), key, authorizedKeys, cfg.AuthorizedUsers)
+			return pubKeyCallback(conn.User(), key, authorizedKeys, users)
 		},
 	}
 
@@ -171,7 +166,6 @@ func (s *SshServer) handleRequests(session Session) {
 	defer session.close()
 	var ptyReq *ptyReq
 	var envVars []string
-	var home = "/home/" + session.user
 	var closed atomic.Bool
 
 	for req := range session.reqs {
@@ -204,10 +198,22 @@ func (s *SshServer) handleRequests(session Session) {
 				return
 			}
 
+			userInfo, ok := s.passwd[session.user]
+			if !ok {
+				req.Reply(false, nil)
+				fmt.Printf("could not find info for user %s in userMap\n", session.user)
+				return
+			}
+
 			req.Reply(true, nil)
-			cmd := exec.Command(s.cfg.Terminal, "-c", command)
+			cmd := exec.Command(userInfo.shell, "-c", command)
 			cmd.Env = envVars
-			cmd.Dir = home
+			cmd.Dir = userInfo.home
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+			cmd.SysProcAttr.Credential = &syscall.Credential{
+				Uid: userInfo.uid,
+				Gid: userInfo.gid,
+			}
 
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
@@ -253,21 +259,29 @@ func (s *SshServer) handleRequests(session Session) {
 				req.Reply(false, nil)
 				return
 			}
+
+			userInfo, ok := s.passwd[session.user]
+			if !ok {
+				req.Reply(false, nil)
+				fmt.Printf("could not find info for user %s in userMap\n", session.user)
+				return
+			}
+
 			req.Reply(true, nil)
 			win := pty.Winsize{
 				X: uint16(ptyReq.Window.Width),
 				Y: uint16(ptyReq.Window.Height),
 			}
 
-			cmd := exec.Command(s.cfg.Terminal)
+			cmd := exec.Command(userInfo.shell)
 			envVars = append(envVars, "TERM="+ptyReq.Term)
 			cmd.Env = append(cmd.Env, envVars...)
-			cmd.Dir = home
+			cmd.Dir = userInfo.home
 			cmd.SysProcAttr = &syscall.SysProcAttr{}
-			// cmd.SysProcAttr.Credential = &syscall.Credential{
-			// 	Uid: 1000,
-			// 	Gid: 1000,
-			// }
+			cmd.SysProcAttr.Credential = &syscall.Credential{
+				Uid: userInfo.uid,
+				Gid: userInfo.gid,
+			}
 
 			terminal, err := pty.StartWithSize(cmd, &win)
 			if err != nil {
@@ -319,4 +333,19 @@ func (s *SshServer) sendExitStatus(ch ssh.Channel, closed *atomic.Bool) {
 	ch.SendRequest("exit-status", false, uint32ToBytes(uint32(statusOk)))
 	fmt.Println("exit status sent")
 	closed.Store(true)
+}
+
+func pubKeyCallback(user string, key ssh.PublicKey, authorizedKeys map[string]bool, authorizedUsers []string) (*ssh.Permissions, error) {
+	if !slices.Contains(authorizedUsers, user) {
+		return nil, fmt.Errorf("user not allowed")
+	}
+
+	if authorizedKeys[ssh.FingerprintSHA256(key)] {
+		return &ssh.Permissions{
+			Extensions: map[string]string{
+				"pubkey": string(key.Marshal()),
+			},
+		}, nil
+	}
+	return nil, fmt.Errorf("unknown public key")
 }

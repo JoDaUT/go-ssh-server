@@ -3,4 +3,4 @@ port: 8001
 authorized_key_file:
 private_key_file:
 authorized_users: [user1,user2]
-terminal: /bin/bash
+passwd_file: /etc/passwd

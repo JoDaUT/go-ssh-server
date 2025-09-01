@@ -10,7 +10,7 @@ import (
 const (
 	port         = "8000"
 	netInterface = "0.0.0.0"
-	terminal     = "/bin/bash"
+	passwdFile   = "/etc/passwd"
 )
 
 type Cfg struct {
@@ -19,14 +19,14 @@ type Cfg struct {
 	AuthorizedKeyFile string   `yaml:"authorized_key_file"`
 	PrivateKeyFile    string   `yaml:"private_key_file"`
 	AuthorizedUsers   []string `yaml:"authorized_users"`
-	Terminal          string   `yaml:"terminal"`
+	PasswdFile        string   `yaml:"passwd_file"`
 }
 
 func LoadCfg(file string) (Cfg, error) {
 	config := Cfg{
-		Port:      port,
-		Interface: netInterface,
-		Terminal:  terminal,
+		Port:       port,
+		Interface:  netInterface,
+		PasswdFile: passwdFile,
 	}
 	f, err := os.Open(file)
 	if err != nil {

@@ -47,9 +47,6 @@ func setupServer(cfg *Cfg) (*SshServer, error) {
 func loadTestConfig() (*Cfg, error) {
 	cfg, err := LoadCfg("testdata/config.test.yaml")
 	cfg.Port = "0"
-	cfg.AuthorizedKeyFile = "testdata/authorized_keys"
-	cfg.PrivateKeyFile = "testdata/fake_server_key"
-
 	if err != nil {
 		return nil, fmt.Errorf("could not load cfg file")
 	}

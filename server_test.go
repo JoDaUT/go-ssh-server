@@ -70,8 +70,7 @@ func TestPubKeyCallback(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sshServer := NewSshServer(nil)
-			got, err := sshServer.pubKeyCallback(tt.user, tt.key, tt.authorizedKeys, tt.authorizedUsers)
+			got, err := pubKeyCallback(tt.user, tt.key, tt.authorizedKeys, tt.authorizedUsers)
 			if !tt.wantErr(t, err) {
 				t.Fail()
 				return

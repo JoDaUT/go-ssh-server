@@ -1,0 +1,6 @@
+services:
+  app: 
+    volumes:
+      - ${PWD}:/go/src
+    build: 
+      dockerfile: Dockerfile

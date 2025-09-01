@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -105,28 +106,30 @@ func parsePtyRequest(payload []byte) (ptyReq, bool) {
 	return pty, true
 }
 
-func loadUsersMap(users []string) (map[string]userInfo, error) {
-	userDetails, err := loadUserInfo(users)
+func loadPasswdMap(users []string, passwdPath string) (map[string]passwd, error) {
+	userDetails, err := loadPasswd(users, passwdPath)
 	if err != nil {
-		return nil, fmt.Errorf("could not load details for authorized users")
+		return nil, fmt.Errorf("could not load details for authorized users: %s", err)
 	}
-	userInfo := make(map[string]userInfo, len(users))
+	userInfo := make(map[string]passwd, len(users))
 	for _, user := range userDetails {
 		userInfo[user.name] = user
 	}
 	return userInfo, nil
 }
 
-func loadUserInfo(users []string) ([]userInfo, error) {
-	usersData := []userInfo{}
+// This code is mostly equivalent to Lookup from the os.users package.
+// The difference is that the Lookup method does not include the default shell for the user.
+func loadPasswd(users []string, passwdPath string) ([]passwd, error) {
+	usersData := []passwd{}
 
 	if len(users) == 0 {
 		return usersData, nil
 	}
 
-	f, err := os.Open("/etc/passwd")
+	f, err := os.Open(passwdPath)
 	if err != nil {
-		return nil, fmt.Errorf("could not open /etc/passwd file")
+		return nil, fmt.Errorf("could not open %s file", passwdPath)
 	}
 	defer f.Close()
 
@@ -135,21 +138,26 @@ func loadUserInfo(users []string) ([]userInfo, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Split(line, ":")
-		username := parts[0]
-		if !slices.Contains(users, username) {
+		if !slices.Contains(users, parts[0]) {
 			continue
 		}
-		uid := parts[2]
-		gid := parts[3]
-		home := parts[5]
-		shell := parts[6]
 
-		user := userInfo{
-			name:  username,
+		uid, err := stringToUint32(parts[2])
+		if err != nil {
+			return nil, err
+		}
+
+		gid, err := stringToUint32(parts[3])
+		if err != nil {
+			return nil, err
+		}
+
+		user := passwd{
+			name:  parts[0],
 			uid:   uid,
 			gid:   gid,
-			home:  home,
-			shell: shell,
+			home:  parts[5],
+			shell: parts[6],
 		}
 
 		usersData = append(usersData, user)
@@ -161,10 +169,18 @@ func loadUserInfo(users []string) ([]userInfo, error) {
 	return usersData, nil
 }
 
-type userInfo struct {
+func stringToUint32(n string) (uint32, error) {
+	converted, err := strconv.ParseUint(n, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("parsing error: %s", err)
+	}
+	return uint32(converted), nil
+}
+
+type passwd struct {
 	name  string
-	uid   string
-	gid   string
+	uid   uint32
+	gid   uint32
 	home  string
 	shell string
 }
