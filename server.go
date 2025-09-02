@@ -327,11 +327,9 @@ func (s *SshServer) handleRequests(session Session) {
 // sends exist-status and updates the atomic closed flag ensuring the message is sent once
 func (s *SshServer) sendExitStatus(ch ssh.Channel, closed *atomic.Bool) {
 	if closed.Load() {
-		fmt.Println("already closed, skipping exit status message")
 		return
 	}
 	ch.SendRequest("exit-status", false, uint32ToBytes(uint32(statusOk)))
-	fmt.Println("exit status sent")
 	closed.Store(true)
 }
 
