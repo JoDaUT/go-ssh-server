@@ -14,7 +14,7 @@ If you're looking for a more polished solution, I encourage you to check out the
 
 ## Limitations
 
-- **Not production-ready**: Lacks critical SSH protocol features and security measures.
+- **Not production-ready**: Lacks critical SSH protocol features and security measures. Features like PTY support for interactive sessions are not complete and were covered to achieve basic funcionality.
 - **Limited compatibility**: May not work with all SSH clients, and there’s no guarantee of full compatibility.
 - **No port forwarding, SFTP or subsystems**: These are essential features for a full SSH server but are not implemented in this project. I might add them in the future.
 - **Not Cross Platform**: Current implementation only works on Linux.
